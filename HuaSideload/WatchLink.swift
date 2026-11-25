@@ -291,15 +291,10 @@ final class WatchLink: NSObject, ObservableObject {
                 append(.info, L("Still connected to \(restored.name ?? "the watch"), setting up the channel again…", "\(restored.name ?? "Saat") ile bağlantı sürüyor, kanal yeniden kuruluyor…"))
                 // The watch may still hold the encrypted session of the previous app instance and then ignores a new
                 // handshake on this link (1/4 Link parameters times out forever). Drop the link and connect fresh,
-                // the same as Find watch -> Pair by hand.
+                // the same as Find watch -> Pair by hand. didDisconnectPeripheral does the reconnect (wantsConnection
+                // is true), so no second connect here.
+                append(.info, L("Reconnecting to the watch with a fresh link…", "Saate yeni bir bağlantıyla yeniden bağlanılıyor…"))
                 central.cancelPeripheralConnection(restored)
-                isConnecting = true
-                Task { [weak self] in
-                    try? await Task.sleep(for: .seconds(2))
-                    guard let self else { return }
-                    self.append(.info, L("Reconnecting to the watch with a fresh link…", "Saate yeni bir bağlantıyla yeniden bağlanılıyor…"))
-                    self.central.connect(restored)
-                }
             } else {
                 isConnecting = true
                 central.connect(restored)
