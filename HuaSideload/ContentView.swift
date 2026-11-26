@@ -17,6 +17,8 @@ struct ContentView: View {
     @State private var huaweiAccountId = CredentialStore.shared.string(CredentialStore.huaweiAccountKey) ?? ""
     @AppStorage(WatchLink.pairingSetupKey) private var sendsPairingSetup = false
     @State private var confirmingFirstPairing = false
+    @AppStorage(PairingMethod.watchMACKey) private var watchMAC = ""
+    @State private var macDraft = ""
     private var filmModeOffered: Bool { link.features.contains { $0.offersFilmMode } }
     private var filmMode: Bool { filmModeOffered && filmModeOn }
 
@@ -29,8 +31,10 @@ struct ContentView: View {
                 statusSection
                 if link.connectedName == nil && !link.isConnecting {
                     devicesSection
+                    if !filmMode { PairingMethodSection(link: link) }
                 } else {
                     watchSection
+                    if !filmMode { PairingMethodSection(link: link) }
                     if link.isPaired { notificationSection }
                     if link.hasSavedPairing && !filmMode {
                         Section {
@@ -199,6 +203,27 @@ struct ContentView: View {
                 }
                 .disabled(!link.huaweiChannelReady || link.busy != nil)
                 .fontWeight(.semibold)
+                .alert(L("Watch MAC address needed", "Saatin MAC adresi gerekiyor"), isPresented: $link.needsWatchMAC) {
+                    TextField("AA:BB:CC:DD:EE:FF", text: $macDraft)
+                        .textInputAutocapitalization(.characters)
+                        .autocorrectionDisabled()
+                    Button(L("Pair", "Eşleş")) {
+                        if let mac = LegacyPairing.normalizedMAC(macDraft) {
+                            watchMAC = mac
+                            link.pair()
+                        } else {
+                            link.needsWatchMAC = false
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { link.needsWatchMAC = true }
+                        }
+                    }
+                    Button(L("Cancel", "Vazgeç"), role: .cancel) {}
+                } message: {
+                    Text(L("This watch uses the older pairing method (no HiChain, experimental), which needs the watch's Bluetooth MAC address. iPhones can't read it, so please type it in. On the watch: Settings → About → MAC address.",
+                           "Bu saat eski eşleşme yöntemini kullanıyor (HiChain'siz, deneysel) ve bunun için saatin Bluetooth MAC adresi gerekiyor. iPhone bunu okuyamıyor, lütfen sen yaz. Saatte: Ayarlar → Hakkında → MAC adresi."))
+                }
+                .onChange(of: link.needsWatchMAC) { _, asking in
+                    if asking { macDraft = watchMAC.isEmpty ? (link.advertisedMACForConnectedWatch ?? "") : watchMAC }
+                }
                 .confirmationDialog(L("First pairing with this watch", "Bu saatle ilk eşleşme"), isPresented: $confirmingFirstPairing, titleVisibility: .visible) {
                     Button(L("Pair now", "Şimdi eşleş")) { link.pair() }
                     Button(L("Cancel", "Vazgeç"), role: .cancel) {}

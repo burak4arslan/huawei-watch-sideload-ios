@@ -30,6 +30,12 @@ final class WatchLink: NSObject, ObservableObject {
     // isPaired: the connection is encrypted, so commands work. pairingStage says whether pairing is really finished.
     @Published private(set) var isPaired = false
     @Published private(set) var pairingStage: PairingStage = .none
+    // The pairing method the connected watch asked for (shown on the Watch tab)
+    @Published private(set) var detectedPairingMethod: PairingMethod?
+    // Set when pairing stopped because the legacy method needs the watch's MAC; the Watch tab asks for it
+    @Published var needsWatchMAC = false
+    // A MAC found in the watch's Bluetooth advertisement, for the legacy method
+    @Published private(set) var advertisedMAC: [UUID: String] = [:]
     @Published private(set) var busy: String?
     @Published private(set) var battery: Int?
     @Published private(set) var watchInfo: [String] = []
@@ -117,6 +123,7 @@ final class WatchLink: NSObject, ObservableObject {
             self.append(.info, L("The watch asked for song info: \(fileName) → \(meta.title)", "Saat şarkı bilgisini sordu: \(fileName) → \(meta.title)"))
         }
         session.onPairingStage = { [weak self] stage in self?.pairingStage = stage }
+        session.onPairingMethodDetected = { [weak self] method in self?.detectedPairingMethod = method }
         session.onWatchFaceConfirm = { [weak self] report in self?.watchFaceConfirmed(report) }
         session.onAppInstallStatus = { [weak self] status, package in
             let kind: LogKind = status == 102 ? .success : (status == 103 || status == 106 ? .error : .info)
@@ -173,6 +180,14 @@ final class WatchLink: NSObject, ObservableObject {
     }
 
     private var watchKey: String? { peripheral?.identifier.uuidString }
+
+    // Typed in on the Watch tab, else found in the advertisement
+    var legacyWatchMAC: String? {
+        if let typed = UserDefaults.standard.string(forKey: PairingMethod.watchMACKey).flatMap(LegacyPairing.normalizedMAC) { return typed }
+        return peripheral.flatMap { advertisedMAC[$0.identifier] }
+    }
+
+    var advertisedMACForConnectedWatch: String? { peripheral.flatMap { advertisedMAC[$0.identifier] } }
 
     var hasSavedPairing: Bool {
         guard let watchKey else { return false }
@@ -320,6 +335,7 @@ final class WatchLink: NSObject, ObservableObject {
         huaweiChannelReady = false
         isPaired = false
         pairingStage = .none
+        detectedPairingMethod = nil
         watchFaceParams = nil
         faceConfirms.removeAll()
         connectedName = nil
@@ -339,9 +355,15 @@ final class WatchLink: NSObject, ObservableObject {
 
     func pair() {
         guard let watchKey else { return }
+        session.pairingMethod = PairingMethod.selected
+        session.legacyWatchMAC = legacyWatchMAC
         run(L("Pairing…", "Eşleşiyor…")) { session in
             do {
                 try await session.pair(watch: watchKey)
+            } catch HuaweiSessionError.needsWatchMAC {
+                self.pairingStage = .channelReady
+                self.needsWatchMAC = true
+                throw HuaweiSessionError.needsWatchMAC
             } catch {
                 self.pairingStage = .failed(String(String(describing: error).prefix(120)))
                 throw error
@@ -1078,6 +1100,11 @@ extension WatchLink: @preconcurrency CBCentralManagerDelegate {
         let name = advertisementData[CBAdvertisementDataLocalNameKey] as? String
         let services = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
         let rssi = RSSI.intValue == 127 ? nil : RSSI.intValue
+        if advertisedMAC[peripheral.identifier] == nil,
+           let data = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
+           let mac = LegacyPairing.macFromAdvertisement([UInt8](data), name: name ?? peripheral.name) {
+            advertisedMAC[peripheral.identifier] = mac
+        }
         upsert(peripheral, name: name, rssi: rssi, systemConnected: false, advertisesHuawei: services.contains(huaweiService))
     }
 

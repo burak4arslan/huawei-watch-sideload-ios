@@ -5,6 +5,7 @@ enum HuaweiSessionError: Error, CustomStringConvertible {
     case disconnected
     case notPaired
     case unsupported(String)
+    case needsWatchMAC
 
     var description: String {
         switch self {
@@ -12,6 +13,8 @@ enum HuaweiSessionError: Error, CustomStringConvertible {
         case .disconnected: return L("Connection lost", "Bağlantı koptu")
         case .notPaired: return L("Pair with the watch first", "Önce eşleşmek gerekiyor")
         case .unsupported(let s): return L("Not supported: \(s)", "Desteklenmiyor: \(s)")
+        case .needsWatchMAC: return L("This watch pairs with the legacy method, which needs the watch's Bluetooth MAC address (on the watch: Settings → About).",
+                                      "Bu saat eski yöntemle eşleşiyor; bunun için saatin Bluetooth MAC adresi gerekiyor (saatte: Ayarlar → Hakkında).")
         }
     }
 }
@@ -53,7 +56,16 @@ final class HuaweiSession {
     private(set) var watchUDID: String?
     private var sessionKey: [UInt8]?
     private var liteCounter: UInt32?
+    // Legacy pairing uses 12 random bytes before the counter in the IV (Gadgetbridge ParamsProvider.getIv)
+    private var counterIVRandomPrefix = false
+    // True for the bond-based methods (HiChain Lite, legacy): no HiChain account setup afterwards
     private(set) var isLitePairing = false
+    // Chosen on the Watch tab; .automatic follows the watch
+    var pairingMethod: PairingMethod = .automatic
+    // The watch's Bluetooth MAC, needed by the legacy method (iOS does not expose it)
+    var legacyWatchMAC: String?
+    // The method the watch asked for, for the Watch tab
+    var onPairingMethodDetected: ((PairingMethod) -> Void)?
     private var waiters: [Waiter] = []
     private var notificationId: UInt16 = 0
 
@@ -128,6 +140,7 @@ final class HuaweiSession {
         isPaired = false
         sessionKey = nil
         liteCounter = nil
+        counterIVRandomPrefix = false
         isLitePairing = false
         let pending = waiters
         waiters.removeAll()
@@ -136,12 +149,15 @@ final class HuaweiSession {
 
     func hasAuthToken(for watch: String) -> Bool {
         store.authToken(for: watch) != nil || liteCredential("pin", watch: watch) != nil
+            || CredentialStore.shared.secure.read("legacy.bonded." + watch) != nil
     }
 
     func forget(watch: String) {
         store.setAuthToken(nil, for: watch)
         CredentialStore.shared.set(nil, for: "lite.pin." + watch)
         CredentialStore.shared.set(nil, for: "lite.secret." + watch)
+        CredentialStore.shared.secure.delete("legacy.secret." + watch)
+        CredentialStore.shared.secure.delete("legacy.bonded." + watch)
         isPaired = false
         sessionKey = nil
     }
@@ -321,7 +337,7 @@ final class HuaweiSession {
         guard let key = sessionKey, let link else { throw HuaweiSessionError.notPaired }
         let iv: [UInt8]
         if var counter = liteCounter {
-            iv = HiChainLite.nextIV(counter: &counter)
+            iv = counterIVRandomPrefix ? LegacyPairing.nextIV(counter: &counter) : HiChainLite.nextIV(counter: &counter)
             liteCounter = counter
         } else {
             iv = HCrypto.random(16)
@@ -339,6 +355,7 @@ final class HuaweiSession {
         isPaired = false
         sessionKey = nil
         liteCounter = nil
+        counterIVRandomPrefix = false
         isLitePairing = false
         onPairingStage?(.negotiating)
 
@@ -354,9 +371,24 @@ final class HuaweiSession {
                 + "support type \(link.deviceSupportType), auth algo \(link.authAlgo), bond state \(link.bondState), encrypt method \(link.encryptMethod)")
         }
 
-        guard [1, 2, 3, 4].contains(link.deviceSupportType) else {
-            throw HuaweiSessionError.unsupported(L("pairing without HiChain (support type \(link.deviceSupportType))",
-                                                   "HiChain'siz eşleşme (destek tipi \(link.deviceSupportType))"))
+        let expected = PairingMethod.expected(supportType: link.deviceSupportType)
+        if let expected {
+            log(.info, L("The watch asks for: ", "Saatin istediği yöntem: ") + expected.shortTitle)
+            onPairingMethodDetected?(expected)
+        }
+        if pairingMethod != .automatic && pairingMethod != expected {
+            log(.error, L("Pairing method set by hand to \(pairingMethod.shortTitle); the watch asks for \(expected?.shortTitle ?? "an unknown method"). Set it back to Automatic if pairing fails.",
+                          "Eşleşme yöntemi elle \(pairingMethod.shortTitle) seçildi; saat \(expected?.shortTitle ?? "bilinmeyen bir yöntem") istiyor. Eşleşme olmazsa Otomatik'e geri al."))
+        }
+        let method = pairingMethod == .automatic ? expected : pairingMethod
+        guard let method else {
+            throw HuaweiSessionError.unsupported(L("unknown pairing method (support type \(link.deviceSupportType))",
+                                                   "bilinmeyen eşleşme yöntemi (destek tipi \(link.deviceSupportType))"))
+        }
+        if method == .legacy {
+            isLitePairing = true
+            try await pairLegacy(watch: watch, link: link)
+            return
         }
         let deviceId = store.deviceId
         let negotiation = try await request(0x01, SecurityNegotiation.commandId,
@@ -372,7 +404,9 @@ final class HuaweiSession {
         }
         let authType = SecurityNegotiation.authType(negotiationTLV)
         log(.info, String(format: L("Pairing type requested by the watch: 0x%X", "Saatin istediği eşleşme türü: 0x%X"), authType))
-        if HiChainLite.supports(link, authType: authType) {
+        let useLite = pairingMethod == .automatic ? HiChainLite.supports(link, authType: authType) : method == .hiChainLite
+        if pairingMethod == .automatic { onPairingMethodDetected?(useLite ? .hiChainLite : .hiChain) }
+        if useLite {
             isLitePairing = true
             try await pairLite(watch: watch, link: link)
             return
@@ -478,6 +512,95 @@ final class HuaweiSession {
             liteCounter = nil
             throw error
         }
+    }
+
+    // Gadgetbridge "normal mode" for watches without HiChain: Auth (0x13) -> BondParams (0x0F) -> Bond (0x0E).
+    // The bonding key is wrapped with a key derived from the watch's own Bluetooth MAC.
+    private func pairLegacy(watch: String, link: LinkInfo) async throws {
+        log(.info, L("EXPERIMENTAL legacy pairing (no HiChain), ported from Gadgetbridge.",
+                     "DENEYSEL eski yöntem eşleşme (HiChain'siz), Gadgetbridge'den çevrildi."))
+        guard let mac = legacyWatchMAC.flatMap(LegacyPairing.normalizedMAC) else {
+            throw HuaweiSessionError.needsWatchMAC
+        }
+        onPairingStage?(.hiChain)
+        let auth = try LegacyPairing.authentication(authVersion: link.authVersion, serverNonce: link.serverNonce,
+                                                    clientNonce: HCrypto.random(16))
+        let response = try await request(0x01, LegacyPairing.authCommand, auth.request,
+                                         label: L("2/4 Authentication", "2/4 Doğrulama"), encrypted: false, timeout: 30)
+        guard let actual = response.tlv?.value(0x01), HiChainLite.validates(actual, expected: auth.expectedResponse) else {
+            throw HuaweiAuthError.tokenMismatch(L("legacy pairing: the watch's authentication answer did not match; nothing else was sent",
+                                                  "eski yöntem: saatin doğrulama cevabı tutmadı; başka bir şey gönderilmedi"))
+        }
+        log(.success, L("2/4 The watch's answer matched", "2/4 Saatin cevabı doğru"))
+
+        let identity = HiChainLite.identity(seed: store.deviceId)
+        let params = try await request(0x01, LegacyPairing.bondParamsCommand,
+                                       HiChainLite.bondParameters(serial: identity.serial, mac: identity.mac),
+                                       label: L("3/4 Bonding parameters", "3/4 Bağlama parametreleri"), encrypted: false)
+        guard let paramsTLV = params.tlv, let status = paramsTLV.int(0x01),
+              let counterBytes = paramsTLV.value(0x09), counterBytes.count == 4,
+              let initialCounter = paramsTLV.int(0x09) else {
+            throw HuaweiAuthError.unexpected("Legacy pairing: invalid bonding status/counter; no bonding key sent")
+        }
+        var counter = UInt32(truncatingIfNeeded: initialCounter)
+        let backend = CredentialStore.shared.secure
+        let saved = backend.read("legacy.secret." + watch).flatMap { [UInt8](hex: $0) }.flatMap { $0.count == 16 ? $0 : nil }
+        if diagnostics { log(.info, "Diag legacy: bond status \(status), saved key \(saved == nil ? "no" : "yes")") }
+
+        // Status 1: the watch already knows this phone's key (Gadgetbridge skips the bond step then)
+        if status == 1, let saved, backend.read("legacy.bonded." + watch) != nil {
+            sessionKey = saved
+            liteCounter = counter
+            counterIVRandomPrefix = true
+            do {
+                _ = try await batteryLevel()
+            } catch {
+                sessionKey = nil
+                liteCounter = nil
+                throw error
+            }
+            finishLegacy()
+            return
+        }
+
+        let secret = saved ?? HCrypto.random(16)
+        // Saved before sending: a lost answer must not lose a key the watch may have accepted
+        guard backend.write(secret.hexCompact, for: "legacy.secret." + watch) else {
+            throw HuaweiAuthError.crypto("Legacy pairing: Keychain write failed; no bonding key sent")
+        }
+        let iv = LegacyPairing.nextIV(counter: &counter)
+        let bond = try LegacyPairing.bond(serial: identity.serial, secret: secret,
+                                          wrappingKey: LegacyPairing.wrappingKey(watchMAC: mac, authVersion: link.authVersion),
+                                          iv: iv, useGCM: link.encryptMethod == 1)
+        sessionKey = secret
+        liteCounter = counter
+        counterIVRandomPrefix = true
+        do {
+            let reply = try await request(0x01, LegacyPairing.bondCommand, bond,
+                                          label: L("4/4 Bonding key (confirm on the watch if asked)", "4/4 Bağlama anahtarı (saatte onay çıkarsa onayla)"),
+                                          encrypted: false, timeout: 60)
+            if let code = reply.tlv?.int(0x7F), code != HuaweiPacket.resultSuccess {
+                throw HuaweiAuthError.watchError(String(format: "Legacy bond result 0x%X", code))
+            }
+            // The bond answer alone proves little: an encrypted request must work too (a wrong MAC fails here)
+            _ = try await batteryLevel()
+        } catch {
+            sessionKey = nil
+            liteCounter = nil
+            counterIVRandomPrefix = false
+            log(.error, L("If the MAC address is wrong, the watch cannot read the key: check it on the watch (Settings → About).",
+                          "MAC adresi yanlışsa saat anahtarı okuyamaz: saatte kontrol et (Ayarlar → Hakkında)."))
+            throw error
+        }
+        _ = backend.write("1", for: "legacy.bonded." + watch)
+        finishLegacy()
+    }
+
+    private func finishLegacy() {
+        isPaired = true
+        onPairingStage?(.authenticated)
+        log(.success, L("Legacy pairing finished: the connection to the watch is encrypted.",
+                        "Eski yöntem eşleşme bitti: saatle bağlantı şifreli."))
     }
 
     // GetHiChainRequest: op 1 returns the permanent key (authToken), op 2 the session key
