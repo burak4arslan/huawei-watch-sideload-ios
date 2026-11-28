@@ -110,6 +110,7 @@ free Apple ID the app has to be reinstalled every 7 days. If your own watch apps
 the app yourself instead: the sideloading tool may change the bundle ID.
 To build an unsigned IPA with your own bundle ID without a Mac, fork the repository and run
 *Actions → Build unsigned IPA*.
+Running it inside [LiveContainer](https://github.com/LiveContainer/LiveContainer)? If the Files picker doesn't respond, turn on **Fix File Picker** and **(Legacy) Fix File Picker** in LiveContainer's settings for the app ([#11](https://github.com/burak4arslan/huawei-watch-sideload-ios/issues/11)).
 
 **Building it yourself (Mac + Xcode):**
 
