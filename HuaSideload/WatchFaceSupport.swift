@@ -40,6 +40,7 @@ enum WatchFaceService {
 
         var isCurrent: Bool { type & 1 == 1 }
         var isFactory: Bool { (type >> 1) & 1 == 1 }
+        var fileName: String { name + "_" + version }
     }
 
     // DeviceWatchInfo: 0x06 = 3 (Gadgetbridge: "overseas non-test")
@@ -82,11 +83,31 @@ enum WatchFaceService {
     }
 
     static let activate: UInt8 = 1
+    static let delete: UInt8 = 2
+    static let nameCommand: UInt8 = 0x06       // WatchfaceNameInfo
 
-    // WatchfaceOperation.Request: name, version, operation (1 = make active; 2 = delete, not used here)
+    // WatchfaceOperation.Request: name, version, operation (1 = make active, 2 = delete)
     static func operation(fileName: String, _ operation: UInt8) -> HuaweiTLV {
         let (name, version) = split(fileName)
         return HuaweiTLV().with(0x01, Array(name.utf8)).with(0x02, Array(version.utf8)).with(0x03, [operation])
+    }
+
+    // WatchfaceNameInfo.Request: 01 = 1, 82 = [83 = [04 = face id]…]
+    static func nameRequest(_ faces: [Installed]) -> HuaweiTLV {
+        let list = faces.reduce(HuaweiTLV()) { $0.with(0x83, HuaweiTLV().with(0x04, Array($1.name.utf8)).serialize()) }
+        return HuaweiTLV().with(0x01, [0x01]).with(0x82, list.serialize())
+    }
+
+    // WatchfaceNameInfo.Response: 82 = [83 = [04 = face id, 05 = title]…]
+    static func parseNames(_ tlv: HuaweiTLV) -> [String: String] {
+        guard let outer = tlv.value(0x82), let container = try? HuaweiTLV.parse(outer) else { return [:] }
+        var names: [String: String] = [:]
+        for item in container.items where item.tag == 0x83 {
+            guard let face = try? HuaweiTLV.parse(item.value) else { continue }
+            let id = text(face, 0x04), title = text(face, 0x05)
+            if !id.isEmpty && !title.isEmpty { names[id] = title }
+        }
+        return names
     }
 
     private static func text(_ tlv: HuaweiTLV, _ tag: UInt8) -> String {

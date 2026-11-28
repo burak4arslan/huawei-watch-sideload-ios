@@ -755,6 +755,24 @@ final class HuaweiSession {
         return response.resultCode
     }
 
+    // Returns the watch's result code, nil when it sent none
+    func deleteWatchFace(fileName: String) async throws -> Int? {
+        let response = try await request(WatchFaceService.serviceId, WatchFaceService.operationCommand,
+                                         WatchFaceService.operation(fileName: fileName, WatchFaceService.delete),
+                                         label: L("Delete the watch face", "Kadranı sil"), timeout: 8)
+        return response.resultCode
+    }
+
+    // Display names of the installed faces; empty when the watch doesn't answer
+    func watchFaceNames(_ faces: [WatchFaceService.Installed]) async -> [String: String] {
+        guard !faces.isEmpty,
+              let response = try? await request(WatchFaceService.serviceId, WatchFaceService.nameCommand,
+                                                WatchFaceService.nameRequest(faces),
+                                                label: L("Watch face names", "Kadran adları"), timeout: 5),
+              let tlv = response.tlv else { return [:] }
+        return WatchFaceService.parseNames(tlv)
+    }
+
     // MARK: - Setup after HiChain (PairingSetup)
 
     struct SetupResult {

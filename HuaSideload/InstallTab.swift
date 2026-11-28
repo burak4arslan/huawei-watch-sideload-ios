@@ -176,6 +176,12 @@ struct InstallTab: View {
                 }
                 .disabled(link.busy != nil)
                 NavigationLink {
+                    WatchFacesOnWatchView(link: link)
+                } label: {
+                    Label(L("Watch faces on the watch", "Saatteki kadranlar"), systemImage: "square.stack")
+                }
+                .disabled(link.busy != nil)
+                NavigationLink {
                     UploadMethodPicker(selection: $faceUploadMethod)
                 } label: {
                     LabeledContent(L("Upload method", "Yükleme yöntemi"),

@@ -74,10 +74,10 @@ enum PairingMethod: String, CaseIterable, Identifiable {
             return L("Tested by one fork owner on a Watch GT 2 Pro.",
                      "Bir fork sahibi Watch GT 2 Pro'da denedi.")
         case .legacy:
-            return L("Not tested on a real watch yet. Ported from Gadgetbridge.",
-                     "Henüz gerçek bir saatte denenmedi. Gadgetbridge'den çevrildi.")
+            return L("Tested by a user on an Honor Band 5. Ported from Gadgetbridge.",
+                     "Bir kullanıcı Honor Band 5'te denedi. Gadgetbridge'den çevrildi.")
         }
     }
 
-    var isTested: Bool { self == .hiChain || self == .hiChainLite }
+    var isTested: Bool { self != .automatic }
 }

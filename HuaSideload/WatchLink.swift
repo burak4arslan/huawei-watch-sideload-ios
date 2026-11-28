@@ -336,6 +336,9 @@ final class WatchLink: NSObject, ObservableObject {
         isPaired = false
         pairingStage = .none
         detectedPairingMethod = nil
+        watchFacesOnWatch = []
+        watchFaceTitles = [:]
+        watchFacesLoaded = false
         watchFaceParams = nil
         faceConfirms.removeAll()
         connectedName = nil
@@ -624,6 +627,52 @@ final class WatchLink: NSObject, ObservableObject {
             }
         }
         return (title, artist)
+    }
+
+    // Watch faces on the watch (service 0x27 list), with display names when the watch gives them
+    @Published private(set) var watchFacesOnWatch: [WatchFaceService.Installed] = []
+    @Published private(set) var watchFaceTitles: [String: String] = [:]
+    @Published private(set) var watchFacesLoaded = false
+    @Published private(set) var deletingFace: String?
+    @Published private(set) var faceListStatus: AppInstallStatus?
+
+    func loadWatchFacesOnWatch() {
+        guard isPaired, busy == nil else { return }
+        run(L("Reading the watch faces on the watch…", "Saatteki kadranlar okunuyor…")) { session in
+            let faces = try await session.installedWatchFaces()
+            self.watchFacesOnWatch = faces
+            self.watchFacesLoaded = true
+            let titles = await session.watchFaceNames(faces)
+            self.watchFaceTitles = titles
+            self.append(.info, L("Watch faces on the watch: ", "Saatteki kadranlar: ") + WatchFaceInstallCheck.describe(faces))
+        }
+    }
+
+    func watchFaceTitle(_ face: WatchFaceService.Installed) -> String {
+        watchFaceTitles[face.name] ?? face.name
+    }
+
+    func deleteWatchFace(_ face: WatchFaceService.Installed) {
+        guard busy == nil, !face.isCurrent else { return }
+        let title = watchFaceTitle(face)
+        deletingFace = face.fileName
+        faceListStatus = nil
+        run(L("Deleting \(title)…", "\(title) siliniyor…")) { session in
+            defer { self.deletingFace = nil }
+            let code = try await session.deleteWatchFace(fileName: face.fileName)
+            let faces = (try? await session.installedWatchFaces()) ?? self.watchFacesOnWatch
+            self.watchFacesOnWatch = faces
+            let gone = !faces.contains { $0.name == face.name }
+            if gone {
+                self.append(.success, L("Watch face deleted: \(title)", "Kadran silindi: \(title)"))
+                self.faceListStatus = AppInstallStatus(text: L("\(title) deleted from the watch", "\(title) saatten silindi"), ok: true)
+            } else {
+                let detail = code.map { String(format: " (0x%X)", $0) } ?? ""
+                self.append(.error, L("The watch did not delete \(title)", "Saat \(title) kadranını silmedi") + detail)
+                self.faceListStatus = AppInstallStatus(text: L("The watch did not delete \(title)", "Saat \(title) kadranını silmedi") + detail, ok: false,
+                                                       hint: face.isFactory ? L("Built-in faces may not be deletable.", "Yerleşik kadranlar silinemeyebilir.") : nil)
+            }
+        }
     }
 
     func loadInstalledAppsOnce() {
