@@ -21,7 +21,19 @@ struct LogEntry: Identifiable {
 
 @MainActor
 final class WatchLink: NSObject, ObservableObject {
-    @Published private(set) var bluetoothState = L("Starting…", "Başlatılıyor…")
+    // Kept as the raw state and turned into text when shown, so it follows a language change
+    @Published private(set) var bluetoothManagerState: CBManagerState?
+    var bluetoothState: String {
+        switch bluetoothManagerState {
+        case nil: return L("Starting…", "Başlatılıyor…")
+        case .poweredOn: return L("On", "Açık")
+        case .poweredOff: return L("Off", "Kapalı")
+        case .unauthorized: return L("Not allowed (Settings > this app > Bluetooth)", "İzin verilmedi (Ayarlar > bu uygulama > Bluetooth)")
+        case .unsupported: return L("Not supported", "Desteklenmiyor")
+        case .resetting: return L("Restarting", "Yeniden başlatılıyor")
+        default: return L("Unknown", "Bilinmiyor")
+        }
+    }
     @Published private(set) var devices: [FoundDevice] = []
     @Published private(set) var isScanning = false
     @Published private(set) var isConnecting = false
@@ -1124,14 +1136,7 @@ extension WatchLink: WatchFeatureHost {
 
 extension WatchLink: @preconcurrency CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        switch central.state {
-        case .poweredOn: bluetoothState = L("On", "Açık")
-        case .poweredOff: bluetoothState = L("Off", "Kapalı")
-        case .unauthorized: bluetoothState = L("Not allowed (Settings > this app > Bluetooth)", "İzin verilmedi (Ayarlar > bu uygulama > Bluetooth)")
-        case .unsupported: bluetoothState = L("Not supported", "Desteklenmiyor")
-        case .resetting: bluetoothState = L("Restarting", "Yeniden başlatılıyor")
-        default: bluetoothState = L("Unknown", "Bilinmiyor")
-        }
+        bluetoothManagerState = central.state
         append(.info, "Bluetooth: \(bluetoothState)")
         if central.state == .poweredOn { reconnectLastWatch() }
     }
